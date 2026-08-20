@@ -67,3 +67,25 @@ skin(segments=20)
     translate([0,0,50])
     circle_offset(10);
 }
+
+// An alignment ray must not select the opposite side of an asymmetric
+// contour. Doing so makes adjacent hollow profiles twist through each other.
+translate([160,0,0])
+skin(segments=20, align_angle=45)
+{
+    difference() {
+        polygon([[2,0], [89,0], [91,5], [91,20], [79,23], [12,23], [0,20], [0,5]]);
+        offset(r=-1.2)
+        polygon([[2,0], [89,0], [91,5], [91,20], [79,23], [12,23], [0,20], [0,5]]);
+    }
+    translate([0,0,20])
+    difference() {
+        square([91,23]);
+        offset(r=-1.2) square([91,23]);
+    }
+    translate([0,0,30])
+    difference() {
+        offset(r=1.2) square([57.5,32.5]);
+        square([57.5,32.5]);
+    }
+}

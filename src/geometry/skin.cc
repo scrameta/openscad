@@ -207,63 +207,38 @@ static std::vector<std::vector<AlignmentPoint>> findAlignmentPoints(std::vector<
       
       Vector2d centre2d(centre[0],centre[1]);
 
-      // Find the vertex that is furthest in align_angle direction in the outer contour
-      // Start by computing the angle of each vertex
-      std::vector<double> angles;
-      for (auto const & vertex : vertices)
-      {
-        auto relative_vertex = vertex-centre2d;
-        double angle = atan2(relative_vertex[1],relative_vertex[0])/(M_PI*2/360);
-        angles.push_back(angle);
-      }
+      // Find where a ray in align_angle direction leaves the contour. Using a
+      // ray (rather than an infinite line) is important for asymmetric
+      // contours: the more distant intersection can be behind the requested
+      // direction and would align adjacent slices to opposite sides.
       if (!has_align_angle)
       {
-	      align_angle = fix_angle(*angles.begin());
+	      auto relative_vertex = vertices.front() - centre2d;
+	      align_angle = fix_angle(atan2(relative_vertex[1], relative_vertex[0]) / (M_PI * 2 / 360));
 	      has_align_angle = true;
       }
 
-      // Then we only care about the pairs which straddle the desired angle
       AlignmentPoint point;
       point.distance_from_centre = -1;
-      double prev_angle = *angles.rbegin();
+      const double align_angle_radians = double(align_angle) * 2.0 * M_PI / 360;
+      const Vector2d ray_direction(cos(align_angle_radians), sin(align_angle_radians));
       int v_prev_i = vertices.size()-1;
       for (int v_i=0, v_end=vertices.size(); v_i!=v_end; ++v_i)
       {
-        auto vc = vertices[v_i]-centre2d;
-        auto vp = vertices[v_prev_i]-centre2d;
-        auto centre2d_rebased = centre2d-centre2d;
-        double angle = angles[v_i];
-
-        double angle_delta = fix_angle(angle-prev_angle);
-
-        if (
-          (angle_delta >= 0 && (angle>=align_angle and prev_angle<=align_angle)) || 
-          (angle_delta < 0 &&  (angle<=align_angle and prev_angle>=align_angle))
-	  )
-        {
-          auto line1 = Eigen::Hyperplane<double,2>::Through(vc,vp);
-          double align_angle_radians = double(align_angle)*2.0*M_PI/360;
-          double linelen = 1e6*(max_point[0]-min_point[0]);
-          Vector2d centre2dadj(centre2d_rebased[0]+linelen,centre2d_rebased[1]+tan(align_angle_radians)*linelen);
-          auto line2 = Eigen::Hyperplane<double,2>::Through(centre2d_rebased,centre2dadj);
-  
-          auto intersect_point = line1.intersection(line2);
-
-          // Distance
-          double distance_from_centre = sqrt(pow(intersect_point[1]-centre2d_rebased[1],2.0) + pow(intersect_point[0]-centre2d_rebased[0],2.0));
-
-          if (distance_from_centre > point.distance_from_centre)
-          {
-            point.distance_from_centre = distance_from_centre;
-            point.intersect_point = intersect_point + centre2d;
+        const Vector2d edge_start = vertices[v_prev_i] - centre2d;
+        const Vector2d edge = vertices[v_i] - vertices[v_prev_i];
+        const double denominator = ray_direction.x() * edge.y() - ray_direction.y() * edge.x();
+        if (std::abs(denominator) > 1e-12) {
+          const double ray_distance = (edge_start.x() * edge.y() - edge_start.y() * edge.x()) / denominator;
+          const double edge_fraction = (edge_start.x() * ray_direction.y() - edge_start.y() * ray_direction.x()) / denominator;
+          if (ray_distance >= 0 && edge_fraction >= 0 && edge_fraction <= 1 &&
+              ray_distance > point.distance_from_centre) {
+            point.distance_from_centre = ray_distance;
+            point.intersect_point = centre2d + ray_distance * ray_direction;
             point.vertex_index = v_prev_i;
-
-            auto relative_point = point.intersect_point-centre2d;
-            double angle = atan2(relative_point[1],relative_point[0])/(M_PI*2/360);
           }
         }
         v_prev_i = v_i;
-        prev_angle = angle;
       }
 
       alignmentPoints[s_i][o_i] = std::move(point);
@@ -706,4 +681,3 @@ std::shared_ptr<const Geometry> skinPolygonSequence(const SkinNode &node, std::v
   }
   return result.build();
 }
-
