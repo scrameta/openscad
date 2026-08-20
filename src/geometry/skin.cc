@@ -4,6 +4,8 @@
 #include "geometry/PolySetBuilder.h"
 #include "geometry/Polygon2d.h"
 
+#include <algorithm>
+
 /* Returns whether travel from p0 => p1 is a negative, zero, or positive distance
  * in the direction of the extusion, with respect to p0's plane.
  */
@@ -409,14 +411,53 @@ static std::vector<std::shared_ptr<const Polygon2d>> interpolateVertices(std::ve
 // Choose a stable seam (the first vertex) for every outline.
 static size_t closestRotation(const Outline2d& previous, const Outline2d& current)
 {
-  size_t bestRotation = 0;
-  double bestCost = std::numeric_limits<double>::infinity();
-  for (size_t rotation = 0; rotation < current.vertices.size(); ++rotation) {
+  constexpr size_t maxSamples = 64;
+  constexpr size_t finalistCount = 8;
+  const size_t vertexCount = current.vertices.size();
+
+  auto rotationCost = [&](size_t rotation, size_t sampleCount) {
     double cost = 0;
-    for (size_t i = 0; i < current.vertices.size(); ++i) {
-      const auto& vertex = current.vertices[(i + rotation) % current.vertices.size()];
+    for (size_t sample = 0; sample < sampleCount; ++sample) {
+      const size_t i = sample * vertexCount / sampleCount;
+      const auto& vertex = current.vertices[(i + rotation) % vertexCount];
       cost += (vertex - previous.vertices[i]).squaredNorm();
     }
+    return cost;
+  };
+
+  // Interpolation can create thousands of vertices. Exhaustive comparison is
+  // useful for small outlines, but for large ones first rank every rotation
+  // using evenly distributed samples, then fully evaluate only the finalists.
+  // This bounds the work to O(vertexCount) while still considering seams all
+  // around the outline.
+  if (vertexCount > maxSamples) {
+    std::vector<std::pair<double, size_t>> candidates;
+    candidates.reserve(vertexCount);
+    for (size_t rotation = 0; rotation < vertexCount; ++rotation)
+      candidates.emplace_back(rotationCost(rotation, maxSamples), rotation);
+
+    auto compareCandidate = [](const auto& lhs, const auto& rhs) {
+      return lhs.first < rhs.first || (lhs.first == rhs.first && lhs.second < rhs.second);
+    };
+    std::nth_element(candidates.begin(), candidates.begin() + finalistCount, candidates.end(), compareCandidate);
+    candidates.resize(finalistCount);
+
+    size_t bestRotation = 0;
+    double bestCost = std::numeric_limits<double>::infinity();
+    for (const auto& candidate : candidates) {
+      const double cost = rotationCost(candidate.second, vertexCount);
+      if (cost < bestCost || (cost == bestCost && candidate.second < bestRotation)) {
+        bestCost = cost;
+        bestRotation = candidate.second;
+      }
+    }
+    return bestRotation;
+  }
+
+  size_t bestRotation = 0;
+  double bestCost = std::numeric_limits<double>::infinity();
+  for (size_t rotation = 0; rotation < vertexCount; ++rotation) {
+    const double cost = rotationCost(rotation, vertexCount);
     if (cost < bestCost) {
       bestCost = cost;
       bestRotation = rotation;
