@@ -406,8 +406,28 @@ static std::vector<std::shared_ptr<const Polygon2d>> interpolateVertices(std::ve
   return slicesadjconst;
 }
 
-// Make the first vertex the alignmentpoint
-static std::vector<std::shared_ptr<const Polygon2d>> spinPolygons(std::vector<std::shared_ptr<const Polygon2d>> const & slicesin, std::vector<std::vector<AlignmentPoint>> & alignmentPoints)
+// Choose a stable seam (the first vertex) for every outline.
+static size_t closestRotation(const Outline2d& previous, const Outline2d& current)
+{
+  size_t bestRotation = 0;
+  double bestCost = std::numeric_limits<double>::infinity();
+  for (size_t rotation = 0; rotation < current.vertices.size(); ++rotation) {
+    double cost = 0;
+    for (size_t i = 0; i < current.vertices.size(); ++i) {
+      const auto& vertex = current.vertices[(i + rotation) % current.vertices.size()];
+      cost += (vertex - previous.vertices[i]).squaredNorm();
+    }
+    if (cost < bestCost) {
+      bestCost = cost;
+      bestRotation = rotation;
+    }
+  }
+  return bestRotation;
+}
+
+static std::vector<std::shared_ptr<const Polygon2d>> spinPolygons(std::vector<std::shared_ptr<const Polygon2d>> const & slicesin,
+                                                                  const std::vector<std::vector<AlignmentPoint>> & alignmentPoints,
+                                                                  bool hasAlignAngle)
 {
   std::vector<std::shared_ptr<Polygon2d>> slicesadj;
   for (auto const & slice : slicesin)
@@ -425,14 +445,26 @@ static std::vector<std::shared_ptr<const Polygon2d>> spinPolygons(std::vector<st
       Polygon2d const & polyin = *slicesin[sl_i];
       Polygon2d & polyadj = *slicesadj[sl_i];
 
-      auto const & alignmentPoint = alignmentPoints[sl_i][o_i];
-
       auto const & vertices = polyin.untransformedOutlines()[o_i].vertices;
       Outline2d outlineadj;
-      
+
+      // An explicit angle is a user-supplied seam. Without one, follow the
+      // preceding slice instead. Polygon vertex zero is arbitrary, and picking
+      // an extrema independently on every slice makes that seam jump when a
+      // nearly symmetric outline changes slightly.
+      size_t rotation = alignmentPoints[sl_i][o_i].vertex_index;
+      if (!hasAlignAngle) {
+        if (sl_i == 0) {
+          rotation = 0;
+        } else if (slicesadj[sl_i - 1]->untransformedOutlines()[o_i].vertices.size() == vertices.size()) {
+          const auto& previous = slicesadj[sl_i - 1]->untransformedOutlines()[o_i];
+          rotation = closestRotation(previous, polyin.untransformedOutlines()[o_i]);
+        }
+      }
+
       for (int vl_i=0, vl_end=vertices.size(); vl_i!=vl_end; ++vl_i)
       {
-        int vl_adj = vl_i + alignmentPoint.vertex_index;
+        size_t vl_adj = vl_i + rotation;
         outlineadj.vertices.push_back(vertices[vl_adj%vertices.size()]);
       }
 
@@ -580,7 +612,7 @@ std::shared_ptr<const Geometry> skinPolygonSequence(const SkinNode &node, std::v
   if (node.interpolate)
     slicesin = interpolateVertices(slicesin, alignmentPoints);
   //dumpPolygons("interpolate",slicesin);
-  slicesin = spinPolygons(slicesin, alignmentPoints);
+  slicesin = spinPolygons(slicesin, alignmentPoints, node.has_align_angle);
   //dumpPolygons("spun",slicesin);
   
   // Verify that every slice has the same number of contours with the same number of vertices
@@ -706,4 +738,3 @@ std::shared_ptr<const Geometry> skinPolygonSequence(const SkinNode &node, std::v
   }
   return result.build();
 }
-
