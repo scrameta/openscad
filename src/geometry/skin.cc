@@ -155,10 +155,11 @@ static void outputQuad(PolySetBuilder & builder, Vector3d const & prev0, Vector3
 
 struct AlignmentPoint 
 {
-  int vertex_index;
+  int vertex_index {-1};
   Vector2d intersect_point;
   double distance_from_centre;
   double distance_round_polygon {-1};
+  std::vector<std::pair<int, Vector2d>> ray_intersections;
 };
 
 static double fix_angle(double angle)
@@ -220,25 +221,47 @@ static std::vector<std::vector<AlignmentPoint>> findAlignmentPoints(std::vector<
 
       AlignmentPoint point;
       point.distance_from_centre = -1;
-      const double align_angle_radians = double(align_angle) * 2.0 * M_PI / 360;
-      const Vector2d ray_direction(cos(align_angle_radians), sin(align_angle_radians));
-      int v_prev_i = vertices.size()-1;
-      for (int v_i=0, v_end=vertices.size(); v_i!=v_end; ++v_i)
-      {
-        const Vector2d edge_start = vertices[v_prev_i] - centre2d;
-        const Vector2d edge = vertices[v_i] - vertices[v_prev_i];
-        const double denominator = ray_direction.x() * edge.y() - ray_direction.y() * edge.x();
-        if (std::abs(denominator) > 1e-12) {
-          const double ray_distance = (edge_start.x() * edge.y() - edge_start.y() * edge.x()) / denominator;
-          const double edge_fraction = (edge_start.x() * ray_direction.y() - edge_start.y() * ray_direction.x()) / denominator;
-          if (ray_distance >= 0 && edge_fraction >= 0 && edge_fraction <= 1 &&
-              ray_distance > point.distance_from_centre) {
-            point.distance_from_centre = ray_distance;
-            point.intersect_point = centre2d + ray_distance * ray_direction;
-            point.vertex_index = v_prev_i;
+      double signed_area = 0;
+      for (size_t i = 0; i < vertices.size(); ++i) {
+        const auto& a = vertices[i];
+        const auto& b = vertices[(i + 1) % vertices.size()];
+        signed_area += a.x() * b.y() - b.x() * a.y();
+      }
+
+      constexpr int alignment_rays = 16;
+      for (int ray = 0; ray < alignment_rays; ++ray) {
+        AlignmentPoint ray_point;
+        ray_point.distance_from_centre = -1;
+        const double direction = align_angle + (signed_area < 0 ? -1 : 1) * ray * 360.0 / alignment_rays;
+        const double direction_radians = direction * 2.0 * M_PI / 360;
+        const Vector2d ray_direction(cos(direction_radians), sin(direction_radians));
+        int v_prev_i = vertices.size() - 1;
+        for (int v_i = 0, v_end = vertices.size(); v_i != v_end; ++v_i) {
+          const Vector2d edge_start = vertices[v_prev_i] - centre2d;
+          const Vector2d edge = vertices[v_i] - vertices[v_prev_i];
+          const double denominator = ray_direction.x() * edge.y() - ray_direction.y() * edge.x();
+          if (std::abs(denominator) > 1e-12) {
+            const double ray_distance = (edge_start.x() * edge.y() - edge_start.y() * edge.x()) / denominator;
+            const double edge_fraction = (edge_start.x() * ray_direction.y() - edge_start.y() * ray_direction.x()) / denominator;
+            if (ray_distance >= 0 && edge_fraction >= 0 && edge_fraction <= 1 &&
+                ray_distance > ray_point.distance_from_centre) {
+              ray_point.distance_from_centre = ray_distance;
+              ray_point.intersect_point = centre2d + ray_distance * ray_direction;
+              ray_point.vertex_index = v_prev_i;
+            }
           }
+          v_prev_i = v_i;
         }
-        v_prev_i = v_i;
+        point.ray_intersections.emplace_back(ray_point.vertex_index, ray_point.intersect_point);
+        if (ray == 0) {
+          point.distance_from_centre = ray_point.distance_from_centre;
+          point.intersect_point = ray_point.intersect_point;
+          point.vertex_index = ray_point.vertex_index;
+        }
+      }
+      if (std::any_of(point.ray_intersections.begin(), point.ray_intersections.end(),
+                      [](const auto& intersection) { return intersection.first < 0; })) {
+        point.ray_intersections.resize(1);
       }
 
       alignmentPoints[s_i][o_i] = std::move(point);
@@ -260,13 +283,15 @@ static std::vector<std::shared_ptr<const Polygon2d>> interpolateVertices(std::ve
     slicesadj.push_back(polyadj);
   }
 
-  // Calculate the distance round each contour and the fraction of each edge
-  // Also adds a new vertex at the alignmentPoint
+  // Divide each contour with angular anchors, then normalize distances only
+  // within each anchored region. This prevents a wiggly edge from shifting
+  // correspondence points around the rest of the contour.
   int outlines_count = slicesin[0]->untransformedOutlines().size();
   for (int o_i=0,o_end=outlines_count; o_i!=o_end; ++o_i)
   {
     std::set<double> all_distance_fractions;
     std::vector<double> slice_distances;
+    std::vector<std::vector<double>> slice_anchor_distances;
     double max_total_distance = 0;
     for (int sl_i=0, sl_end=slicesin.size(); sl_i!=sl_end; ++sl_i)
     {
@@ -274,8 +299,9 @@ static std::vector<std::shared_ptr<const Polygon2d>> interpolateVertices(std::ve
 
       auto & vertices = slicesin[sl_i]->untransformedOutlines()[o_i].vertices;
       double total_distance = 0;
-      std::vector<double> dist;
-      dist.push_back(0);
+      std::vector<double> vertex_distances;
+      vertex_distances.push_back(0);
+      std::vector<double> anchor_distances(alignmentPoint.ray_intersections.size(), -1);
       for (int vl_i=0, vl_end=vertices.size(); vl_i!=vl_end; ++vl_i)
       {
         bool last = (vl_i+1)==vertices.size();
@@ -284,25 +310,49 @@ static std::vector<std::shared_ptr<const Polygon2d>> interpolateVertices(std::ve
 
         double distance = sqrt(pow(diff[0],2) + pow(diff[1],2));
 
-        if (vl_i==alignmentPoint.vertex_index)
-        {
-          auto diff_align = alignmentPoint.intersect_point - vertices[vl_i];
-          double distance_align = sqrt(pow(diff_align[0],2) + pow(diff_align[1],2));
-          alignmentPoint.distance_round_polygon = total_distance + distance_align;
-          dist.push_back(alignmentPoint.distance_round_polygon);
+        for (size_t ray = 0; ray < alignmentPoint.ray_intersections.size(); ++ray) {
+          if (vl_i == alignmentPoint.ray_intersections[ray].first) {
+            anchor_distances[ray] = total_distance +
+              (alignmentPoint.ray_intersections[ray].second - vertices[vl_i]).norm();
+          }
         }
 
         total_distance += distance;
         if (!last)
-          dist.push_back(total_distance);
+          vertex_distances.push_back(total_distance);
       }
+      alignmentPoint.distance_round_polygon = anchor_distances.front();
       slice_distances.push_back(total_distance);
-      max_total_distance = std::max(max_total_distance,total_distance);
-      for (double distance_fraction : dist)
-      {
-        distance_fraction /= total_distance;
-        all_distance_fractions.insert(distance_fraction);
+      std::vector<double> relative_anchors;
+      for (double anchor : anchor_distances) {
+        double relative = anchor - anchor_distances.front();
+        if (relative < 0) relative += total_distance;
+        relative_anchors.push_back(relative);
       }
+      if (!std::is_sorted(relative_anchors.begin(), relative_anchors.end())) {
+        // A centre outside a deeply concave contour can make angular ray order
+        // differ from boundary order. Fall back to the original single-anchor
+        // perimeter interpolation for that contour rather than crossing it.
+        relative_anchors.resize(1);
+      }
+      slice_anchor_distances.push_back(relative_anchors);
+      max_total_distance = std::max(max_total_distance,total_distance);
+      const size_t ray_count = relative_anchors.size();
+      for (double vertex_distance : vertex_distances) {
+        double relative = vertex_distance - anchor_distances.front();
+        if (relative < 0) relative += total_distance;
+        for (size_t ray = 0; ray < ray_count; ++ray) {
+          const double begin = relative_anchors[ray];
+          const double end = ray + 1 < ray_count ? relative_anchors[ray + 1] : total_distance;
+          if (relative >= begin && relative <= end) {
+            const double local_fraction = end > begin ? (relative - begin) / (end - begin) : 0;
+            all_distance_fractions.insert((ray + local_fraction) / ray_count);
+            break;
+          }
+        }
+      }
+      for (size_t ray = 0; ray < ray_count; ++ray)
+        all_distance_fractions.insert(double(ray) / ray_count);
     }
 
     // Simplify fractions
@@ -339,9 +389,23 @@ static std::vector<std::shared_ptr<const Polygon2d>> interpolateVertices(std::ve
       alignmentPoint.vertex_index = -1;
       double alignment_point_distance = std::numeric_limits<double>::infinity();
 
-      for (double distance_fraction : all_distance_fractions)
+      std::vector<double> output_distances;
+      for (double distance_fraction : all_distance_fractions) {
+        const auto& anchors = slice_anchor_distances[sl_i];
+        const double scaled_fraction = distance_fraction * anchors.size();
+        const size_t ray = std::min(size_t(scaled_fraction), anchors.size() - 1);
+        const double local_fraction = scaled_fraction - ray;
+        const double anchor_begin = anchors[ray];
+        const double anchor_end = ray + 1 < anchors.size() ? anchors[ray + 1] : slice_distances[sl_i];
+        double vertex_distance = alignmentPoint.distance_round_polygon +
+          anchor_begin + local_fraction * (anchor_end - anchor_begin);
+        if (vertex_distance >= slice_distances[sl_i]) vertex_distance -= slice_distances[sl_i];
+        output_distances.push_back(vertex_distance);
+      }
+      std::sort(output_distances.begin(), output_distances.end());
+
+      for (double vertex_distance : output_distances)
       {
-        double vertex_distance = distance_fraction * slice_distances[sl_i];
         if (vertex_distance > distance_next) 
         {
           // Next point

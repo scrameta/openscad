@@ -6,6 +6,17 @@ skin(segments=20)
     square(10,center=true);
 }
 
+// Extra length in one part of a contour must not shift every subsequent
+// correspondence. The rays divide the perimeter into local interpolation
+// regions, keeping the right-hand corners aligned despite the zig-zag.
+translate([280,0,0])
+skin(align_angle=0)
+{
+    polygon([[0,0], [40,0], [40,40], [0,40]]);
+    translate([0,0,30])
+    polygon([[0,0], [40,0], [40,40], [30,38], [25,42], [20,38], [15,42], [10,38], [0,40]]);
+}
+
 module square_manual(sz)
 {
     difference()
